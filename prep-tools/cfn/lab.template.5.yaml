@@ -1,0 +1,532 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Parameters:
+  AgentFoundationModel:
+    Type: String
+    Default: anthropic.claude-3-haiku-20240307-v1:0
+    Description: The name of the Bedrock foundation model
+
+  CollectionName:
+    Type: String
+    Description: Name of the OpenSearch Serverless collection
+    Default: dlai
+
+  EmbeddingModelArn:
+    Type: String
+    Description: The ARN of the Amazon Bedrock model to use for embedding
+    Default: arn:aws:bedrock:us-west-2::foundation-model/cohere.embed-english-v3
+
+  LambdaCodeS3Bucket:
+    Type: String
+    Description: S3 bucket containing the Lambda function code
+    Default: sc-aws-course-2  
+
+  OpenSearchConfigurationFunctionLambdaCodeS3Key:
+    Type: String
+    Description: S3 key for the Lambda function code zip file
+    Default: functions/lambda_deployment_openSearchConfiguration.zip
+
+  UploadObjectsFunctionLambdaCodeS3Key:
+    Type: String
+    Description: S3 key for the Upload Objects Lambda function code zip file
+    Default: functions/lambda_deployment_uploadObjects.zip
+
+  KbIngestJobFunctionLambdaCodeS3Key:
+    Type: String
+    Description: S3 key for the KB Ingest Job Lambda function code zip file
+    Default: functions/lambda_deployment_kbIngestJob.zip
+
+  KnowledgeBaseEmbeddingModelArn:
+    Type: String
+    Description: The ARN of the Amazon Bedrock model to use for the Knowledge Base embedding
+    Default: arn:aws:bedrock:us-west-2::foundation-model/cohere.embed-english-v3
+
+  UploadSourceBucket:
+    Type: String
+    Description: S3 bucket containing the source documents
+    Default: sc-aws-course-2
+
+  UploadSourcePrefix:
+    Type: String
+    Description: S3 prefix for the source documents
+    Default: sample_docs
+
+  KnowledgeBaseName:
+    Type: String
+    Default: dlai-kb
+
+Resources:
+
+################################################################################
+# Necessary Roles
+################################################################################
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: lambda_basic_execution
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+
+  BedrockAgentRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: agent_bedrock_access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource:
+                  - !Sub "arn:aws:bedrock:${AWS::Region}::foundation-model/${AgentFoundationModel}"
+              - Effect: Allow
+                Action: bedrock:ApplyGuardrail
+                Resource:
+                  - !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:guardrail/*"
+              - Effect: Allow
+                Action: bedrock:Retrieve
+                Resource:
+                  - !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:knowledge-base/*"
+
+################################################################################
+# OpenSearch Serverless
+################################################################################
+
+  OpenSearchCollection:
+    Type: AWS::OpenSearchServerless::Collection
+    Properties:
+      Name: !Ref CollectionName
+      Description: 'Serverless OpenSearch collection for DLAI'
+      Type: VECTORSEARCH
+      StandbyReplicas: DISABLED
+    DependsOn: 
+      - EncryptionPolicy
+      - NetworkPolicy
+
+  EncryptionPolicy:
+    Type: AWS::OpenSearchServerless::SecurityPolicy
+    Properties:
+      Name: !Sub ${CollectionName}-encryption-policy
+      Description: 'Encryption policy for OpenSearch Serverless collection'
+      Type: encryption
+      Policy: 
+        !Sub |
+          {
+            "Rules": [
+              {
+                "ResourceType": "collection",
+                "Resource": ["collection/${CollectionName}"]
+              }
+            ],
+            "AWSOwnedKey": true
+          }
+
+  NetworkPolicy:
+    Type: AWS::OpenSearchServerless::SecurityPolicy
+    Properties:
+      Name: !Sub ${CollectionName}-network-policy
+      Description: 'Network policy for OpenSearch Serverless collection'
+      Type: network
+      Policy: 
+        !Sub |
+          [
+            {
+              "Rules": [
+                {
+                  "ResourceType": "dashboard",
+                  "Resource": ["collection/${CollectionName}"]
+                },
+                {
+                  "ResourceType": "collection",
+                  "Resource": ["collection/${CollectionName}"]
+                }
+              ],
+              "AllowFromPublic": true
+            }
+          ]
+
+  BedrockRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${CollectionName}-amazon-bedrock-kb-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub ${CollectionName}AOSSPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: !Ref EmbeddingModelArn
+              - Effect: Allow
+                Action: aoss:APIAccessAll
+                Resource: !GetAtt OpenSearchCollection.Arn
+              - Effect: Allow
+                Action: 
+                  - s3:Get*
+                  - s3:List*
+                  - s3:GetBucketLocation
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource: 
+                  - "arn:aws:s3:::*"
+                  - "arn:aws:s3:::*/*"
+
+  KnowledgeBaseRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${CollectionName}-knowledge-base-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: KnowledgeBasePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - aoss:APIAccessAll
+                Resource: !GetAtt OpenSearchCollection.Arn
+              - Effect: Allow
+                Action: 
+                  - bedrock:InvokeModel
+                Resource: !Ref KnowledgeBaseEmbeddingModelArn
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt DocumentsBucket.Arn
+                  - !Sub "${DocumentsBucket.Arn}/*"
+
+  AccessPolicy:
+    Type: AWS::OpenSearchServerless::AccessPolicy
+    Properties:
+      Name: !Sub ${CollectionName}-access-policy
+      Description: 'Access policy for OpenSearch Serverless collection'
+      Type: data
+      Policy: 
+        !Sub |
+          [
+            {
+              "Rules": [
+                {
+                  "Resource": [
+                    "collection/${CollectionName}"
+                  ],
+                  "Permission": [
+                    "aoss:CreateCollectionItems",
+                    "aoss:UpdateCollectionItems",
+                    "aoss:DescribeCollectionItems"
+                  ],
+                  "ResourceType": "collection"
+                },
+                {
+                  "Resource": [
+                    "index/${CollectionName}/*"
+                  ],
+                  "Permission": [
+                    "aoss:CreateIndex",
+                    "aoss:UpdateIndex",
+                    "aoss:DescribeIndex",
+                    "aoss:ReadDocument",
+                    "aoss:WriteDocument"
+                  ],
+                  "ResourceType": "index"
+                }
+              ],
+              "Principal": [
+                "${BedrockRole.Arn}",
+                "${OpenSearchConfigurationRole.Arn}",
+                "${KnowledgeBaseRole.Arn}"
+              ]
+            }
+          ]
+
+################################################################################
+# Knowledge Base
+################################################################################
+
+  DocumentsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  KnowledgeBase:
+    Type: AWS::Bedrock::KnowledgeBase
+    Properties:
+      Name: !Ref KnowledgeBaseName
+      Description: Knowledge base for lesson 5
+      RoleArn: !GetAtt KnowledgeBaseRole.Arn
+      KnowledgeBaseConfiguration:
+        Type: "VECTOR"
+        VectorKnowledgeBaseConfiguration:
+          EmbeddingModelArn: !Ref KnowledgeBaseEmbeddingModelArn
+      StorageConfiguration:
+        Type: "OPENSEARCH_SERVERLESS"
+        OpensearchServerlessConfiguration:
+          CollectionArn: !GetAtt OpenSearchCollection.Arn
+          VectorIndexName: !Sub ${CollectionName}-index
+          FieldMapping:
+            VectorField: "bedrock-knowledge-base-default-vector"
+            TextField: "AMAZON_BEDROCK_TEXT_CHUNK"
+            MetadataField: "AMAZON_BEDROCK_METADATA"
+    DependsOn:
+      - OpenSearchCollection
+      - OpenSearchConfiguration
+
+  KnowledgeBaseDataSource:
+    Type: AWS::Bedrock::DataSource
+    Properties:
+      KnowledgeBaseId: !Ref KnowledgeBase
+      Name: !Sub ${AWS::StackName}-data-source
+      Description: S3 data source for knowledge base
+      DataSourceConfiguration:
+        Type: "S3"
+        S3Configuration:
+          BucketArn: !GetAtt DocumentsBucket.Arn
+
+
+################################################################################
+# Custom Resources
+################################################################################
+
+# Roles:
+
+  SharedLambdaPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: arn:aws:logs:*:*:*
+
+  OpenSearchConfigurationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${CollectionName}-opensearch-config-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Ref SharedLambdaPolicy
+      Policies:
+        - PolicyName: OpenSearchConfigurationPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - aoss:APIAccessAll
+                  - aoss:ListCollections
+                  - aoss:BatchGetCollection
+                  - aoss:ListAccessPolicies
+                Resource: '*'
+
+  UploadObjectsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${CollectionName}-upload-objects-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Ref SharedLambdaPolicy
+      Policies:
+        - PolicyName: UploadObjectsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                Resource:
+                  - arn:aws:s3:::*
+                  - arn:aws:s3:::*/*
+
+  KbIngestJobRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${CollectionName}-kb-ingest-job-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Ref SharedLambdaPolicy
+      Policies:
+        - PolicyName: KbIngestJobPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:StartIngestionJob
+                  - bedrock:GetIngestionJob
+                Resource: '*'
+
+# Lambda Functions:
+
+  OpenSearchConfigurationFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        S3Bucket: !Ref LambdaCodeS3Bucket
+        S3Key: !Ref OpenSearchConfigurationFunctionLambdaCodeS3Key
+      Handler: app.lambda_handler
+      Runtime: python3.10
+      Role: !GetAtt OpenSearchConfigurationRole.Arn
+      Timeout: 300
+      MemorySize: 256
+
+  UploadObjectsFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        S3Bucket: !Ref LambdaCodeS3Bucket
+        S3Key: !Ref UploadObjectsFunctionLambdaCodeS3Key
+      Handler: app.lambda_handler
+      Runtime: python3.10
+      Role: !GetAtt UploadObjectsRole.Arn
+      Timeout: 300
+      MemorySize: 256
+
+  KbIngestJobFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        S3Bucket: !Ref LambdaCodeS3Bucket
+        S3Key: !Ref KbIngestJobFunctionLambdaCodeS3Key
+      Handler: app.lambda_handler
+      Runtime: python3.10
+      Role: !GetAtt KbIngestJobRole.Arn
+      Timeout: 300
+      MemorySize: 256
+
+# Custom Resources:
+
+  UploadObjects:
+    Type: Custom::UploadObjects
+    Properties:
+      ServiceToken: !GetAtt UploadObjectsFunction.Arn
+      SourceBucket: !Ref UploadSourceBucket
+      SourcePrefix: !Ref UploadSourcePrefix
+      DestinationBucket: !Ref DocumentsBucket
+      DestinationPrefix: ''
+
+  KbIngestJob:
+    Type: Custom::KbIngestJob
+    Properties:
+      ServiceToken: !GetAtt KbIngestJobFunction.Arn
+      KnowledgeBaseId: !Ref KnowledgeBase
+      DataSourceId: !GetAtt KnowledgeBaseDataSource.DataSourceId
+
+  OpenSearchConfiguration:
+    Type: Custom::OpenSearchConfiguration
+    Properties:
+      ServiceToken: !GetAtt OpenSearchConfigurationFunction.Arn
+      CollectionName: !Ref CollectionName
+      Region: !Ref 'AWS::Region'
+      CollectionEndpoint: !GetAtt OpenSearchCollection.CollectionEndpoint 
+    DependsOn: 
+      - OpenSearchCollection
+      - EncryptionPolicy
+      - NetworkPolicy
+      - AccessPolicy
+
+################################################################################
+# Outputs
+################################################################################
+
+Outputs:
+
+  LAMBDAEXECUTIONROLE:
+    Description: ARN of the Lambda execution role
+    Value: !GetAtt LambdaExecutionRole.Arn
+
+  BEDROCKAGENTROLE:
+    Description: ARN of the Bedrock Agent IAM Role
+    Value: !GetAtt BedrockAgentRole.Arn
+
+  COLLECTIONNAME:
+    Description: Name of the OpenSearch Serverless collection
+    Value: !Ref CollectionName
+
+  COLLECTIONARN:
+    Description: ARN of the OpenSearch Serverless collection
+    Value: !GetAtt OpenSearchCollection.Arn
+
+  ROLEARN:
+    Description: ARN of the IAM role for the OpenSearch Serverless collection
+    Value: !GetAtt BedrockRole.Arn
+
+  INDEXNAME:
+    Description: Name of the OpenSearch Serverless index
+    Value: !Sub ${CollectionName}-index
+
+  KNOWLEDGEBASEID:
+    Description: ID of the Bedrock Knowledge Base
+    Value: !Ref KnowledgeBase

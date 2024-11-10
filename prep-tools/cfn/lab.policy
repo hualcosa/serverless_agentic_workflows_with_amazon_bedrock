@@ -1,0 +1,76 @@
+{
+	"Version": "2012-10-17",
+	"Statement": [
+		{
+			"Effect": "Allow",
+			"Action": [
+				"bedrock:Delete*",
+				"bedrock:CreateGuardrail",
+				"bedrock:CreateGuardrailVersion",
+                "bedrock:ListGuardrails",
+				"bedrock:CreateAgent",
+				"bedrock:PrepareAgent",
+				"bedrock:GetAgent",
+                "bedrock:ListAgents",
+				"bedrock:UpdateAgent",
+				"bedrock:CreateAgentAlias",
+				"bedrock:UpdateAgentAlias",
+				"bedrock:CreateAgentActionGroup",
+				"bedrock:UpdateAgentActionGroup",
+                "bedrock:GetAgentActionGroup",
+				"bedrock:CreateKnowledgeBase",
+				"bedrock:GetKnowledgeBase",
+				"bedrock:CreateDataSource",
+				"bedrock:StartIngestionJob",
+				"bedrock:GetIngestionJob",
+				"bedrock:AssociateAgentKnowledgeBase",
+				"bedrock:InvokeAgent",
+				"bedrock:GetAgentAlias"
+			],
+			"Resource": [
+				"*"
+			]
+		},
+		{
+			"Effect": "Allow",
+			"Action": [
+				"lambda:Delete*",
+				"lambda:CreateFunction",
+				"lambda:AddPermission",
+                "lambda:ListFunctions"
+			],
+			"Resource": "*"
+		},
+		{
+			"Effect": "Allow",
+			"Action": [
+				"s3:Delete*",
+				"s3:CreateBucket",
+				"s3:PutObject"
+			],
+			"Resource": "*"
+		},
+		{
+			"Effect": "Allow",
+			"Action": [
+				"cloudformation:DescribeStacks",
+				"cloudformation:ListStacks"
+			],
+			"Resource": "*"
+		},
+		{
+			"Effect": "Allow",
+			"Action": [
+				"sts:GetCallerIdentity"
+			],
+			"Resource": "*"
+		},
+		{
+			"Effect": "Allow",
+			"Action": [
+				"iam:PassRole"
+			],
+			"Resource": "*"
+		}
+	]
+}
